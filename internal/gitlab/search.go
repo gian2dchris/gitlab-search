@@ -89,6 +89,8 @@ func (c *Client) SearchGitlab(opts SearchOptions, nomrs bool, noissues bool) ([]
 
 	// 3. Global/Group search for MRs
 	if !nomrs {
+		fmt.Printf("Searching for '%s' in Merge Requests...\n", opts.Query)
+
 		for _, group := range opts.Groups {
 			wg.Add(1)
 			go func() {
@@ -122,6 +124,8 @@ func (c *Client) SearchGitlab(opts SearchOptions, nomrs bool, noissues bool) ([]
 
 	// 4. Global/Group search for Issues
 	if !noissues {
+
+		fmt.Printf("Searching for '%s' in Issues...\n", opts.Query)
 		for _, group := range opts.Groups {
 			wg.Add(1)
 			go func() {

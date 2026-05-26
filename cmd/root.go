@@ -24,6 +24,8 @@ native global search features.`,
 		token := viper.GetString("token")
 		searchQuery := viper.GetString("search")
 		limit := viper.GetFloat64("limit")
+		nomrs := viper.GetBool("no-mrs")
+		noissues := viper.GetBool("no-issues")
 		verbose := viper.GetBool("verbose")
 
 		if host == "" || token == "" || searchQuery == "" {
@@ -36,6 +38,9 @@ native global search features.`,
 		fmt.Printf("Search:     '%s'\n", searchQuery)
 		fmt.Printf("Rate Limit: %.1f req/sec\n", limit)
 		fmt.Printf("Verbose:     %t\n", verbose)
+		fmt.Printf("MRs:     %t\n", !nomrs)
+		fmt.Printf("Issues:     %t\n", !noissues)
+
 		if file := viper.GetString("file"); file != "" {
 			fmt.Printf("File Match: %s\n", file)
 		}
@@ -59,7 +64,7 @@ native global search features.`,
 			Groups:   viper.GetStringSlice("group"),
 		}
 
-		results, err := client.SearchGitlab(opts)
+		results, err := client.SearchGitlab(opts, nomrs, noissues)
 		if err != nil {
 			return err
 		}
@@ -165,6 +170,9 @@ func init() {
 	rootCmd.Flags().StringSliceP("project", "p", []string{}, "Project filter (comma-separated)")
 	rootCmd.Flags().StringSliceP("group", "g", []string{}, "Group filter (comma-separated)")
 	rootCmd.Flags().BoolP("verbose", "v", false, "Print verbose output")
+	rootCmd.Flags().Bool("no-mrs", false, "Do not search for MRs")
+	rootCmd.Flags().Bool("no-issues", false, "Do not search for Issues")
+
 	// Bind flags to viper
 	viper.BindPFlag("host", rootCmd.Flags().Lookup("host"))
 	viper.BindPFlag("token", rootCmd.Flags().Lookup("token"))
@@ -174,6 +182,8 @@ func init() {
 	viper.BindPFlag("group", rootCmd.Flags().Lookup("group"))
 	viper.BindPFlag("limit", rootCmd.PersistentFlags().Lookup("limit"))
 	viper.BindPFlag("verbose", rootCmd.Flags().Lookup("verbose"))
+	viper.BindPFlag("no-mrs", rootCmd.Flags().Lookup("no-mrs"))
+	viper.BindPFlag("no-issues", rootCmd.Flags().Lookup("no-issues"))
 }
 
 func initConfig() {

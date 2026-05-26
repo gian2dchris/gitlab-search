@@ -35,7 +35,7 @@ type ProjectJob struct {
 	Project *gitlab.Project
 }
 
-func (c *Client) SearchGitlab(opts SearchOptions) ([]SearchResult, error) {
+func (c *Client) SearchGitlab(opts SearchOptions, nomrs bool, noissues bool) ([]SearchResult, error) {
 	ctx := context.Background()
 
 	// 1. Discover projects to search (needed for per-project blobs)
@@ -86,14 +86,69 @@ func (c *Client) SearchGitlab(opts SearchOptions) ([]SearchResult, error) {
 	close(projChan)
 
 	// 3. Global/Group search for Issues & MRs (Efficiency)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		enrichedRes := c.searchIssuesAndMRs(ctx, opts, projects)
-		mu.Lock()
-		allResults = append(allResults, enrichedRes...)
-		mu.Unlock()
-	}()
+	if !nomrs {
+		for _, group := range opts.Groups {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				mrsRes, err := c.searchMRs(ctx, group, opts.Query)
+				if err != nil {
+					fmt.Printf("Warning: failed to search MRs in group %s: %v\n", group, err)
+					return
+				}
+				mu.Lock()
+				allResults = append(allResults, mrsRes...)
+				mu.Unlock()
+			}()
+		}
+
+		if len(opts.Groups) == 0 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				mrsRes, err := c.searchMRs(ctx, "", opts.Query)
+				if err != nil {
+					fmt.Printf("Warning: failed to search issues/MRs globally: %v\n", err)
+					return
+				}
+				mu.Lock()
+				allResults = append(allResults, mrsRes...)
+				mu.Unlock()
+			}()
+		}
+	}
+
+	if !noissues {
+		for _, group := range opts.Groups {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				issuesRes, err := c.searchIssues(ctx, group, opts.Query)
+				if err != nil {
+					fmt.Printf("Warning: failed to search MRs in group %s: %v\n", group, err)
+					return
+				}
+				mu.Lock()
+				allResults = append(allResults, issuesRes...)
+				mu.Unlock()
+			}()
+		}
+
+		if len(opts.Groups) == 0 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				issuesRes, err := c.searchMRs(ctx, "", opts.Query)
+				if err != nil {
+					fmt.Printf("Warning: failed to search issues/MRs globally: %v\n", err)
+					return
+				}
+				mu.Lock()
+				allResults = append(allResults, issuesRes...)
+				mu.Unlock()
+			}()
+		}
+	}
 
 	// Wait for all searches to complete
 	go func() {
@@ -161,58 +216,6 @@ func (c *Client) searchBlobsByProject(ctx context.Context, p *gitlab.Project, qu
 		opt.Page = resp.NextPage
 	}
 	return results, nil
-}
-
-func (c *Client) searchIssuesAndMRs(ctx context.Context, opts SearchOptions, projects []*gitlab.Project) []SearchResult {
-	var res []SearchResult
-
-	for _, group := range opts.Groups {
-		issuesRes, err := c.searchIssues(ctx, group, opts.Query)
-		if err != nil {
-			fmt.Printf("Warning: failed to search issues in group %s: %v\n", group, err)
-			continue
-		}
-		res = append(res, issuesRes...)
-
-		mrsRes, err := c.searchMRs(ctx, group, opts.Query)
-		if err != nil {
-			fmt.Printf("Warning: failed to search MRs in group %s: %v\n", group, err)
-			continue
-		}
-		res = append(res, mrsRes...)
-	}
-
-	if len(opts.Groups) == 0 {
-		issuesRes, err := c.searchIssues(ctx, "", opts.Query)
-		if err != nil {
-			fmt.Printf("Warning: failed to search issues globally: %v\n", err)
-		}
-		res = append(res, issuesRes...)
-
-		mrsRes, err := c.searchMRs(ctx, "", opts.Query)
-		if err != nil {
-			fmt.Printf("Warning: failed to search issues/MRs globally: %v\n", err)
-		}
-		res = append(res, mrsRes...)
-	}
-
-	// Create project map for fast lookup
-	pMap := make(map[int64]*gitlab.Project)
-	for _, p := range projects {
-		pMap[p.ID] = p
-	}
-
-	// Filter and enrich global results
-	var enrichedRes []SearchResult
-	for _, r := range res {
-		if p, ok := pMap[r.ProjectID]; ok {
-			r.ProjectName = p.PathWithNamespace
-			r.ProjectURL = c.makeProjectSearchURL(p, opts.Query)
-			enrichedRes = append(enrichedRes, r)
-		}
-	}
-
-	return enrichedRes
 }
 
 func (c *Client) searchIssues(ctx context.Context, groupID string, query string) ([]SearchResult, error) {
@@ -319,7 +322,7 @@ func filePatternToRegex(pattern string) string {
 	r := regexp.QuoteMeta(pattern)
 	r = strings.ReplaceAll(r, "\\*", ".*")
 	r = strings.ReplaceAll(r, "\\?", ".")
-	return "^" + r + "$"
+	return r
 }
 
 func (c *Client) getProjects(ctx context.Context, opts SearchOptions) ([]*gitlab.Project, error) {

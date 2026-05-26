@@ -35,7 +35,7 @@ native global search features.`,
 		fmt.Printf("Host:       %s\n", host)
 		fmt.Printf("Search:     '%s'\n", searchQuery)
 		fmt.Printf("Rate Limit: %.1f req/sec\n", limit)
-		fmt.Printf("Verbose:     '%t'\n", verbose)
+		fmt.Printf("Verbose:     %t\n", verbose)
 		if file := viper.GetString("file"); file != "" {
 			fmt.Printf("File Match: %s\n", file)
 		}

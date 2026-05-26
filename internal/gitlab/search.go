@@ -30,6 +30,11 @@ type SearchResult struct {
 	ProjectURL    string // Search link for the project UI
 }
 
+type ProjectJob struct {
+	Index   int
+	Project *gitlab.Project
+}
+
 func (c *Client) SearchGitlab(opts SearchOptions) ([]SearchResult, error) {
 	ctx := context.Background()
 
@@ -41,11 +46,6 @@ func (c *Client) SearchGitlab(opts SearchOptions) ([]SearchResult, error) {
 
 	fmt.Printf("Searching for '%s' in %d projects...\n", opts.Query, len(projects))
 
-	re, err := regexp.Compile(opts.Query)
-	if err != nil {
-		return nil, fmt.Errorf("invalid regex pattern: %w", err)
-	}
-
 	var allResults []SearchResult
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -53,7 +53,7 @@ func (c *Client) SearchGitlab(opts SearchOptions) ([]SearchResult, error) {
 	const workers = 10
 
 	// 2. Parallel per-project Blob search (CE Compatibility)
-	projChan := make(chan *gitlab.Project, len(projects))
+	projChan := make(chan *ProjectJob, len(projects))
 	resChan := make(chan []SearchResult, workers)
 
 	// Create workers
@@ -61,9 +61,11 @@ func (c *Client) SearchGitlab(opts SearchOptions) ([]SearchResult, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for p := range projChan {
-				fmt.Printf("[*] %s\n", p.PathWithNamespace)
-				res, err := c.searchBlobsByProject(ctx, p, opts.Query, re, opts.File)
+			for pj := range projChan {
+				p := pj.Project
+				idx := pj.Index
+				fmt.Printf("[%d/%d] %s\n", idx, len(projects), p.PathWithNamespace)
+				res, err := c.searchBlobsByProject(ctx, p, opts.Query, opts.File)
 				if err != nil {
 					fmt.Printf("Warning: failed to search blobs in %s: %v\n", p.PathWithNamespace, err)
 					return
@@ -74,8 +76,12 @@ func (c *Client) SearchGitlab(opts SearchOptions) ([]SearchResult, error) {
 	}
 
 	// send jobs
-	for _, p := range projects {
-		projChan <- p
+	for idx, p := range projects {
+		pj := &ProjectJob{
+			Index:   idx,
+			Project: p,
+		}
+		projChan <- pj
 	}
 	close(projChan)
 
@@ -104,7 +110,7 @@ func (c *Client) SearchGitlab(opts SearchOptions) ([]SearchResult, error) {
 	return allResults, nil
 }
 
-func (c *Client) searchBlobsByProject(ctx context.Context, p *gitlab.Project, query string, re *regexp.Regexp, filePattern string) ([]SearchResult, error) {
+func (c *Client) searchBlobsByProject(ctx context.Context, p *gitlab.Project, query string, filePattern string) ([]SearchResult, error) {
 	opt := &gitlab.SearchOptions{
 		ListOptions: gitlab.ListOptions{
 			PerPage: 100,

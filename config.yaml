@@ -1,0 +1,20 @@
+# GitLab Search CLI Configuration
+# GitLab host URL
+host: https://gitlab.com/
+# GitLab Personal Access Token (requires read-api scope)
+token: glpat-xxxx
+# Search query or regex pattern
+search: ""
+# Optional: File path pattern filter (e.g., *.php, src/**/*.go)
+file: ""
+# Optional: GitLab API rate limit (requests per second)
+limit: 2
+# Optional: List of projects to search within
+project:
+# - project1
+# Optional: List of groups to search within
+group:
+  # - group1
+no-mrs: false
+no-issues: false
+verbose: true

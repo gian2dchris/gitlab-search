@@ -19,17 +19,16 @@ type SearchOptions struct {
 	Groups   []string
 }
 type SearchResult struct {
-	Type          string `json:"type"`            // "CODE", "ISSUE", "MR"
+	Type          string `json:"type"` // "CODE", "ISSUE", "MR"
 	ProjectName   string `json:"project_name"`
 	ProjectID     int64  `json:"project_id"`
 	ProjectWebURL string `json:"project_web_url"` // Home link for the project
 	Title         string `json:"title"`
 	FilePath      string `json:"file_path,omitempty"` // Only for CODE
 	State         string `json:"state,omitempty"`
-	URL           string `json:"url"`           // Direct link (with #L for CODE)
-	ProjectURL    string `json:"project_url"`    // Search link for the project UI
+	URL           string `json:"url"`         // Direct link (with #L for CODE)
+	ProjectURL    string `json:"project_url"` // Search link for the project UI
 }
-
 
 type ProjectJob struct {
 	Index   int
@@ -166,20 +165,22 @@ func (c *Client) SearchGitlab(opts SearchOptions, nomrs bool, noissues bool) ([]
 		mu.Unlock()
 	}
 
-	// Enrich results with project metadata if missing (mostly for Issues/MRs found globally)
+	// Filter and Enrich results with project metadata
 	pMap := make(map[int64]*gitlab.Project)
 	for _, p := range projects {
 		pMap[p.ID] = p
 	}
 
-	for i := range allResults {
-		if p, ok := pMap[allResults[i].ProjectID]; ok {
-			allResults[i].ProjectName = p.PathWithNamespace
-			allResults[i].ProjectWebURL = p.WebURL
+	var filteredResults []SearchResult
+	for _, r := range allResults {
+		if p, ok := pMap[r.ProjectID]; ok {
+			r.ProjectName = p.PathWithNamespace
+			r.ProjectWebURL = p.WebURL
+			filteredResults = append(filteredResults, r)
 		}
 	}
 
-	return allResults, nil
+	return filteredResults, nil
 }
 
 func (c *Client) searchBlobsByProject(ctx context.Context, p *gitlab.Project, query string, filePattern string) ([]SearchResult, error) {
@@ -214,16 +215,16 @@ func (c *Client) searchBlobsByProject(ctx context.Context, p *gitlab.Project, qu
 			if b.Startline > 0 {
 				fragment = fmt.Sprintf("#L%d", b.Startline)
 			}
-results = append(results, SearchResult{
-	Type:          "CODE",
-	ProjectName:   p.PathWithNamespace,
-	ProjectID:     p.ID,
-	ProjectWebURL: p.WebURL,
-	Title:         b.Filename,
-	FilePath:      b.Filename,
-	URL:           fmt.Sprintf("%s/-/blob/%s/%s%s", p.WebURL, p.DefaultBranch, b.Filename, fragment),
-	ProjectURL:    c.makeProjectSearchURL(p.ID, query, "CODE"),
-})
+			results = append(results, SearchResult{
+				Type:          "CODE",
+				ProjectName:   p.PathWithNamespace,
+				ProjectID:     p.ID,
+				ProjectWebURL: p.WebURL,
+				Title:         b.Filename,
+				FilePath:      b.Filename,
+				URL:           fmt.Sprintf("%s/-/blob/%s/%s%s", p.WebURL, p.DefaultBranch, b.Filename, fragment),
+				ProjectURL:    c.makeProjectSearchURL(p.ID, query, "CODE"),
+			})
 
 		}
 

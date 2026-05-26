@@ -49,79 +49,41 @@ func (c *Client) SearchGitlab(opts SearchOptions) ([]SearchResult, error) {
 	var allResults []SearchResult
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	// Limit concurrency for blobs
+	const workers = 10
 
 	// 2. Parallel per-project Blob search (CE Compatibility)
-	blobChan := make(chan []SearchResult, len(projects))
-	semaphore := make(chan struct{}, 10) // Limit concurrency for blobs
+	projChan := make(chan *gitlab.Project, len(projects))
+	resChan := make(chan []SearchResult, workers)
 
-	for _, p := range projects {
+	// Create workers
+	for w := 0; w < workers; w++ {
 		wg.Add(1)
-		go func(p *gitlab.Project) {
+		go func() {
 			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			res, err := c.searchBlobsByProject(ctx, p, opts.Query, re, opts.File)
-			if err != nil {
-				fmt.Printf("Warning: failed to search blobs in %s: %v\n", p.PathWithNamespace, err)
-				return
+			for p := range projChan {
+				fmt.Printf("[*] %s\n", p.PathWithNamespace)
+				res, err := c.searchBlobsByProject(ctx, p, opts.Query, re, opts.File)
+				if err != nil {
+					fmt.Printf("Warning: failed to search blobs in %s: %v\n", p.PathWithNamespace, err)
+					return
+				}
+				resChan <- res
 			}
-			blobChan <- res
-		}(p)
+		}()
 	}
+
+	// send jobs
+	for _, p := range projects {
+		projChan <- p
+	}
+	close(projChan)
 
 	// 3. Global/Group search for Issues & MRs (Efficiency)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		var res []SearchResult
-
-		for _, group := range opts.Groups {
-			issuesRes, err := c.searchIssues(ctx, group, opts.Query)
-			if err != nil {
-				fmt.Printf("Warning: failed to search issues in group %s: %v\n", group, err)
-				continue
-			}
-			res = append(res, issuesRes...)
-
-			mrsRes, err := c.searchMRs(ctx, group, opts.Query)
-			if err != nil {
-				fmt.Printf("Warning: failed to search MRs in group %s: %v\n", group, err)
-				continue
-			}
-			res = append(res, mrsRes...)
-		}
-
-		if len(opts.Groups) == 0 {
-			issuesRes, err := c.searchIssues(ctx, "", opts.Query)
-			if err != nil {
-				fmt.Printf("Warning: failed to search issues globally: %v\n", err)
-			}
-			res = append(res, issuesRes...)
-
-			mrsRes, err := c.searchMRs(ctx, "", opts.Query)
-			if err != nil {
-				fmt.Printf("Warning: failed to search issues/MRs globally: %v\n", err)
-			}
-			res = append(res, mrsRes...)
-		}
-
-		// Create project map for fast lookup
-		pMap := make(map[int64]*gitlab.Project)
-		for _, p := range projects {
-			pMap[p.ID] = p
-		}
-
-		// Filter and enrich global results
-		var enrichedRes []SearchResult
-		for _, r := range res {
-			if p, ok := pMap[r.ProjectID]; ok {
-				r.ProjectName = p.PathWithNamespace
-				r.ProjectURL = c.makeProjectSearchURL(p, opts.Query)
-				enrichedRes = append(enrichedRes, r)
-			}
-		}
-
+		enrichedRes := c.searchIssuesAndMRs(ctx, opts, projects)
 		mu.Lock()
 		allResults = append(allResults, enrichedRes...)
 		mu.Unlock()
@@ -130,10 +92,10 @@ func (c *Client) SearchGitlab(opts SearchOptions) ([]SearchResult, error) {
 	// Wait for all searches to complete
 	go func() {
 		wg.Wait()
-		close(blobChan)
+		close(resChan)
 	}()
 
-	for res := range blobChan {
+	for res := range resChan {
 		mu.Lock()
 		allResults = append(allResults, res...)
 		mu.Unlock()
@@ -193,6 +155,58 @@ func (c *Client) searchBlobsByProject(ctx context.Context, p *gitlab.Project, qu
 		opt.Page = resp.NextPage
 	}
 	return results, nil
+}
+
+func (c *Client) searchIssuesAndMRs(ctx context.Context, opts SearchOptions, projects []*gitlab.Project) []SearchResult {
+	var res []SearchResult
+
+	for _, group := range opts.Groups {
+		issuesRes, err := c.searchIssues(ctx, group, opts.Query)
+		if err != nil {
+			fmt.Printf("Warning: failed to search issues in group %s: %v\n", group, err)
+			continue
+		}
+		res = append(res, issuesRes...)
+
+		mrsRes, err := c.searchMRs(ctx, group, opts.Query)
+		if err != nil {
+			fmt.Printf("Warning: failed to search MRs in group %s: %v\n", group, err)
+			continue
+		}
+		res = append(res, mrsRes...)
+	}
+
+	if len(opts.Groups) == 0 {
+		issuesRes, err := c.searchIssues(ctx, "", opts.Query)
+		if err != nil {
+			fmt.Printf("Warning: failed to search issues globally: %v\n", err)
+		}
+		res = append(res, issuesRes...)
+
+		mrsRes, err := c.searchMRs(ctx, "", opts.Query)
+		if err != nil {
+			fmt.Printf("Warning: failed to search issues/MRs globally: %v\n", err)
+		}
+		res = append(res, mrsRes...)
+	}
+
+	// Create project map for fast lookup
+	pMap := make(map[int64]*gitlab.Project)
+	for _, p := range projects {
+		pMap[p.ID] = p
+	}
+
+	// Filter and enrich global results
+	var enrichedRes []SearchResult
+	for _, r := range res {
+		if p, ok := pMap[r.ProjectID]; ok {
+			r.ProjectName = p.PathWithNamespace
+			r.ProjectURL = c.makeProjectSearchURL(p, opts.Query)
+			enrichedRes = append(enrichedRes, r)
+		}
+	}
+
+	return enrichedRes
 }
 
 func (c *Client) searchIssues(ctx context.Context, groupID string, query string) ([]SearchResult, error) {

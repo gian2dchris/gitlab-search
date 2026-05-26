@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -17,18 +18,18 @@ type SearchOptions struct {
 	Projects []string
 	Groups   []string
 }
-
 type SearchResult struct {
-	Type          string // "CODE", "ISSUE", "MR"
-	ProjectName   string
-	ProjectID     int64
-	ProjectWebURL string // Home link for the project
-	Title         string
-	FilePath      string // Only for CODE
-	State         string
-	URL           string // Direct link (with #L for CODE)
-	ProjectURL    string // Search link for the project UI
+	Type          string `json:"type"`            // "CODE", "ISSUE", "MR"
+	ProjectName   string `json:"project_name"`
+	ProjectID     int64  `json:"project_id"`
+	ProjectWebURL string `json:"project_web_url"` // Home link for the project
+	Title         string `json:"title"`
+	FilePath      string `json:"file_path,omitempty"` // Only for CODE
+	State         string `json:"state,omitempty"`
+	URL           string `json:"url"`           // Direct link (with #L for CODE)
+	ProjectURL    string `json:"project_url"`    // Search link for the project UI
 }
+
 
 type ProjectJob struct {
 	Index   int
@@ -64,11 +65,11 @@ func (c *Client) SearchGitlab(opts SearchOptions, nomrs bool, noissues bool) ([]
 			for pj := range projChan {
 				p := pj.Project
 				idx := pj.Index
-				fmt.Printf("[%d/%d] %s\n", idx, len(projects), p.PathWithNamespace)
+				fmt.Printf("[%d/%d] %s\n", idx+1, len(projects), p.PathWithNamespace)
 				res, err := c.searchBlobsByProject(ctx, p, opts.Query, opts.File)
 				if err != nil {
 					fmt.Printf("Warning: failed to search blobs in %s: %v\n", p.PathWithNamespace, err)
-					return
+					continue
 				}
 				resChan <- res
 			}
@@ -76,16 +77,18 @@ func (c *Client) SearchGitlab(opts SearchOptions, nomrs bool, noissues bool) ([]
 	}
 
 	// send jobs
-	for idx, p := range projects {
-		pj := &ProjectJob{
-			Index:   idx,
-			Project: p,
+	go func() {
+		for idx, p := range projects {
+			pj := &ProjectJob{
+				Index:   idx,
+				Project: p,
+			}
+			projChan <- pj
 		}
-		projChan <- pj
-	}
-	close(projChan)
+		close(projChan)
+	}()
 
-	// 3. Global/Group search for Issues & MRs (Efficiency)
+	// 3. Global/Group search for MRs
 	if !nomrs {
 		for _, group := range opts.Groups {
 			wg.Add(1)
@@ -108,7 +111,7 @@ func (c *Client) SearchGitlab(opts SearchOptions, nomrs bool, noissues bool) ([]
 				defer wg.Done()
 				mrsRes, err := c.searchMRs(ctx, "", opts.Query)
 				if err != nil {
-					fmt.Printf("Warning: failed to search issues/MRs globally: %v\n", err)
+					fmt.Printf("Warning: failed to search MRs globally: %v\n", err)
 					return
 				}
 				mu.Lock()
@@ -118,6 +121,7 @@ func (c *Client) SearchGitlab(opts SearchOptions, nomrs bool, noissues bool) ([]
 		}
 	}
 
+	// 4. Global/Group search for Issues
 	if !noissues {
 		for _, group := range opts.Groups {
 			wg.Add(1)
@@ -125,7 +129,7 @@ func (c *Client) SearchGitlab(opts SearchOptions, nomrs bool, noissues bool) ([]
 				defer wg.Done()
 				issuesRes, err := c.searchIssues(ctx, group, opts.Query)
 				if err != nil {
-					fmt.Printf("Warning: failed to search MRs in group %s: %v\n", group, err)
+					fmt.Printf("Warning: failed to search Issues in group %s: %v\n", group, err)
 					return
 				}
 				mu.Lock()
@@ -138,9 +142,9 @@ func (c *Client) SearchGitlab(opts SearchOptions, nomrs bool, noissues bool) ([]
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				issuesRes, err := c.searchMRs(ctx, "", opts.Query)
+				issuesRes, err := c.searchIssues(ctx, "", opts.Query)
 				if err != nil {
-					fmt.Printf("Warning: failed to search issues/MRs globally: %v\n", err)
+					fmt.Printf("Warning: failed to search Issues globally: %v\n", err)
 					return
 				}
 				mu.Lock()
@@ -160,6 +164,19 @@ func (c *Client) SearchGitlab(opts SearchOptions, nomrs bool, noissues bool) ([]
 		mu.Lock()
 		allResults = append(allResults, res...)
 		mu.Unlock()
+	}
+
+	// Enrich results with project metadata if missing (mostly for Issues/MRs found globally)
+	pMap := make(map[int64]*gitlab.Project)
+	for _, p := range projects {
+		pMap[p.ID] = p
+	}
+
+	for i := range allResults {
+		if p, ok := pMap[allResults[i].ProjectID]; ok {
+			allResults[i].ProjectName = p.PathWithNamespace
+			allResults[i].ProjectWebURL = p.WebURL
+		}
 	}
 
 	return allResults, nil
@@ -197,17 +214,17 @@ func (c *Client) searchBlobsByProject(ctx context.Context, p *gitlab.Project, qu
 			if b.Startline > 0 {
 				fragment = fmt.Sprintf("#L%d", b.Startline)
 			}
+results = append(results, SearchResult{
+	Type:          "CODE",
+	ProjectName:   p.PathWithNamespace,
+	ProjectID:     p.ID,
+	ProjectWebURL: p.WebURL,
+	Title:         b.Filename,
+	FilePath:      b.Filename,
+	URL:           fmt.Sprintf("%s/-/blob/%s/%s%s", p.WebURL, p.DefaultBranch, b.Filename, fragment),
+	ProjectURL:    c.makeProjectSearchURL(p.ID, query, "CODE"),
+})
 
-			results = append(results, SearchResult{
-				Type:        "CODE",
-				ProjectName: p.PathWithNamespace,
-				ProjectID:   p.ID,
-				Title:       b.Filename,
-				FilePath:    b.Filename,
-				State:       b.Basename,
-				URL:         fmt.Sprintf("%s/-/blob/%s/%s%s", p.WebURL, p.DefaultBranch, b.Filename, fragment),
-				ProjectURL:  c.makeProjectSearchURL(p, query),
-			})
 		}
 
 		if resp.NextPage == 0 {
@@ -247,12 +264,13 @@ func (c *Client) searchIssues(ctx context.Context, groupID string, query string)
 
 		for _, i := range issues {
 			results = append(results, SearchResult{
-				Type:      "ISSUE",
-				ProjectID: int64(i.ProjectID),
-				Title:     i.Title,
-				State:     i.State,
-				URL:       i.WebURL,
-				// ProjectName and ProjectURL will be resolved/filled later or fetched
+				Type:        "ISSUE",
+				ProjectID:   int64(i.ProjectID),
+				ProjectName: fmt.Sprintf("project: %s", strconv.FormatInt(int64(i.ProjectID), 10)),
+				Title:       i.Title,
+				State:       i.State,
+				URL:         i.WebURL,
+				ProjectURL:  c.makeProjectSearchURL(int64(i.ProjectID), query, "ISSUE"),
 			})
 		}
 		if resp.NextPage == 0 {
@@ -295,11 +313,13 @@ func (c *Client) searchMRs(ctx context.Context, groupID string, query string) ([
 
 		for _, m := range mrs {
 			results = append(results, SearchResult{
-				Type:      "MR",
-				ProjectID: int64(m.ProjectID),
-				Title:     m.Title,
-				State:     m.State,
-				URL:       m.WebURL,
+				Type:        "MR",
+				ProjectName: fmt.Sprintf("project: %s", strconv.FormatInt(int64(m.ProjectID), 10)),
+				ProjectID:   int64(m.ProjectID),
+				Title:       m.Title,
+				State:       m.State,
+				URL:         m.WebURL,
+				ProjectURL:  c.makeProjectSearchURL(int64(m.ProjectID), query, "MR"),
 			})
 		}
 		if resp.NextPage == 0 {
@@ -311,18 +331,28 @@ func (c *Client) searchMRs(ctx context.Context, groupID string, query string) ([
 	return results, nil
 }
 
-func (c *Client) makeProjectSearchURL(p *gitlab.Project, query string) string {
-	u, _ := url.Parse(p.WebURL)
-	// Example: https://{host}/search?search=axios%40&project_id=929&scope=blobs
-	return fmt.Sprintf("%s://%s/search?search=%s&project_id=%d&scope=blobs",
-		u.Scheme, u.Host, url.QueryEscape(query), p.ID)
+func (c *Client) makeProjectSearchURL(pid int64, query string, pType string) string {
+	u := c.BaseURL()
+	var pURL string
+
+	switch pType {
+	case "CODE":
+		// Example: https://{host}/search?search=axios%40&project_id=929&scope=blobs
+		pURL = fmt.Sprintf("%s://%s/search?search=%s&project_id=%d&scope=blobs", u.Scheme, u.Host, url.QueryEscape(query), pid)
+	case "ISSUE":
+		// Example: https://{host}/search?search=axios%40&project_id=929&scope=issues
+		pURL = fmt.Sprintf("%s://%s/search?search=%s&project_id=%d&scope=issues", u.Scheme, u.Host, url.QueryEscape(query), pid)
+	case "MR":
+		// Example: https://{host}/search?search=axios%40&project_id=929&scope=merge_requests
+		pURL = fmt.Sprintf("%s://%s/search?search=%s&project_id=%d&scope=merge_requests", u.Scheme, u.Host, url.QueryEscape(query), pid)
+	}
+
+	return pURL
 }
 
 func filePatternToRegex(pattern string) string {
-	r := regexp.QuoteMeta(pattern)
-	r = strings.ReplaceAll(r, "\\*", ".*")
-	r = strings.ReplaceAll(r, "\\?", ".")
-	return r
+	pattern = strings.ReplaceAll(pattern, "*", ".*")
+	return pattern
 }
 
 func (c *Client) getProjects(ctx context.Context, opts SearchOptions) ([]*gitlab.Project, error) {

@@ -34,3 +34,5 @@ go.work.sum
 GEMINI.md
 gitlab-search
 config.yaml
+output
+output.txt

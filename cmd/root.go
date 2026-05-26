@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -26,10 +29,19 @@ native global search features.`,
 		limit := viper.GetFloat64("limit")
 		nomrs := viper.GetBool("no-mrs")
 		noissues := viper.GetBool("no-issues")
+		jsonOut := viper.GetString("json")
 		verbose := viper.GetBool("verbose")
 
 		if host == "" || token == "" || searchQuery == "" {
 			return fmt.Errorf("host, token, and search query are required")
+		}
+
+		var jsonFilename string
+		if jsonOut != "" {
+			jsonFilename = jsonOut
+			if jsonFilename == "AUTO" {
+				jsonFilename = generateDefaultFilename(host, searchQuery)
+			}
 		}
 
 		// Print configuration header
@@ -37,9 +49,13 @@ native global search features.`,
 		fmt.Printf("Host:       %s\n", host)
 		fmt.Printf("Search:     '%s'\n", searchQuery)
 		fmt.Printf("Rate Limit: %.1f req/sec\n", limit)
-		fmt.Printf("Verbose:     %t\n", verbose)
-		fmt.Printf("MRs:     %t\n", !nomrs)
+		fmt.Printf("MRs:        %t\n", !nomrs)
 		fmt.Printf("Issues:     %t\n", !noissues)
+		fmt.Printf("Verbose:    %t\n", verbose)
+
+		if jsonFilename != "" {
+			fmt.Printf("JSON Out:   %s\n", jsonFilename)
+		}
 
 		if file := viper.GetString("file"); file != "" {
 			fmt.Printf("File Match: %s\n", file)
@@ -74,7 +90,17 @@ native global search features.`,
 			return nil
 		}
 
-		// Group results by project
+		// JSON Export (optional)
+		if jsonOut != "" {
+			err := exportJSON(jsonFilename, results)
+			if err != nil {
+				fmt.Printf("Error exporting to JSON: %v\n", err)
+			} else {
+				fmt.Printf("Results exported to %s\n", jsonFilename)
+			}
+		}
+
+		// Group results by project for stdout
 		grouped := make(map[string][]gitlab.SearchResult)
 		for _, res := range results {
 			grouped[res.ProjectName] = append(grouped[res.ProjectName], res)
@@ -91,56 +117,49 @@ native global search features.`,
 
 		for _, name := range projectNames {
 			projectResults := grouped[name]
-			// Use the first result to get the project search URL
-			projectURL := projectResults[0].ProjectURL
+			// Use the first result to get the project links
+			projectWebURL := projectResults[0].ProjectWebURL
+			projectSearchURL := projectResults[0].ProjectURL
 
-			fmt.Printf("\033[1;34m%s\033[0m\n", name)
-			if projectURL != "" {
-				fmt.Printf("\033[0;37m %s\033[0m\n", projectURL)
+			// Pattern: project name in blue: project link
+			fmt.Printf("  \033[1;34m%s\033[0m: \033[0;37m%s\033[0m\n", name, projectWebURL)
+			// Pattern: project search link scope=blob
+			if projectSearchURL != "" {
+				fmt.Printf("  \033[0;90m%s\033[0m\n", projectSearchURL)
 			}
-			fmt.Println(strings.Repeat("-", len(name)))
 
 			if verbose {
-
 				for _, res := range projectResults {
-					var typeColor int
-					var stateColor int
-
-					if res.Type == "CODE" {
-						typeColor = 34
-						stateColor = 37
-					}
+					typeColor := "32"  // Green for CODE
+					stateColor := "37" // Default white
 
 					if res.Type == "ISSUE" {
-						typeColor = 33
+						typeColor = "33" // Yellow
 						switch res.State {
 						case "opened":
-							stateColor = 32
+							stateColor = "32" // Green
 						case "closed":
-							stateColor = 31
+							stateColor = "31" // Red
 						}
-					}
-					if res.Type == "MR" {
-						typeColor = 35
+					} else if res.Type == "MR" {
+						typeColor = "35" // Magenta
 						switch res.State {
 						case "opened":
-							stateColor = 32
+							stateColor = "32" // Green
 						case "merged":
-							stateColor = 34
+							stateColor = "34" // Blue
 						case "closed":
-							stateColor = 31
+							stateColor = "31" // Red
 						}
 					}
 
-					// [\033[1;%dm%s\033[0m]\n",
-					fmt.Printf("[\033[1;%dm%s\033[0m] \033[1;37m%s\033[0m", typeColor, res.Type, res.Title)
-					if res.Type == "CODE" {
-						fmt.Println()
-					} else {
-						fmt.Printf(" [\033[1;%dm%s\033[0m]\n", stateColor, res.State)
+					// Pattern: [TYPE] Title (State)
+					fmt.Printf("    [\033[1;%sm%s\033[0m] \033[1;37m%s\033[0m", typeColor, res.Type, res.Title)
+					if res.Type != "CODE" && res.State != "" {
+						fmt.Printf(" [\033[1;%sm%s\033[0m]", stateColor, res.State)
 					}
-					fmt.Printf("%s\n", res.URL)
 					fmt.Println()
+					fmt.Printf("    %s\n", res.URL)
 				}
 			}
 			fmt.Println()
@@ -148,6 +167,32 @@ native global search features.`,
 
 		return nil
 	},
+}
+
+func generateDefaultFilename(host, query string) string {
+	h := strings.TrimPrefix(host, "http://")
+	h = strings.TrimPrefix(h, "https://")
+	h = strings.ReplaceAll(h, ".", "-")
+	h = strings.ReplaceAll(h, "/", "-")
+	h = strings.Trim(h, "-")
+
+	q := strings.ReplaceAll(query, " ", "-")
+	reg := regexp.MustCompile(`[^a-zA-Z0-9-]`)
+	q = reg.ReplaceAllString(q, "")
+	q = strings.Trim(q, "-")
+
+	suffix := make([]byte, 4)
+	rand.Read(suffix)
+
+	return fmt.Sprintf("%s-%s-%x.json", h, q, suffix)
+}
+
+func exportJSON(filename string, results []gitlab.SearchResult) error {
+	data, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filename, data, 0644)
 }
 
 func Execute() {
@@ -169,9 +214,11 @@ func init() {
 	rootCmd.Flags().StringP("file", "f", "", "File path pattern filter (e.g. *.php)")
 	rootCmd.Flags().StringSliceP("project", "p", []string{}, "Project filter (comma-separated)")
 	rootCmd.Flags().StringSliceP("group", "g", []string{}, "Group filter (comma-separated)")
-	rootCmd.Flags().BoolP("verbose", "v", false, "Print verbose output")
 	rootCmd.Flags().Bool("no-mrs", false, "Do not search for MRs")
 	rootCmd.Flags().Bool("no-issues", false, "Do not search for Issues")
+	rootCmd.Flags().BoolP("verbose", "v", false, "Print individual match results")
+	rootCmd.Flags().String("json", "", "Export results to JSON file. If no filename is provided, one will be generated.")
+	rootCmd.Flags().Lookup("json").NoOptDefVal = "AUTO"
 
 	// Bind flags to viper
 	viper.BindPFlag("host", rootCmd.Flags().Lookup("host"))
@@ -181,9 +228,10 @@ func init() {
 	viper.BindPFlag("project", rootCmd.Flags().Lookup("project"))
 	viper.BindPFlag("group", rootCmd.Flags().Lookup("group"))
 	viper.BindPFlag("limit", rootCmd.PersistentFlags().Lookup("limit"))
-	viper.BindPFlag("verbose", rootCmd.Flags().Lookup("verbose"))
 	viper.BindPFlag("no-mrs", rootCmd.Flags().Lookup("no-mrs"))
 	viper.BindPFlag("no-issues", rootCmd.Flags().Lookup("no-issues"))
+	viper.BindPFlag("verbose", rootCmd.Flags().Lookup("verbose"))
+	viper.BindPFlag("json", rootCmd.Flags().Lookup("json"))
 }
 
 func initConfig() {

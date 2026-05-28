@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gian/gitlab-search/internal/gitlab"
 	"github.com/spf13/cobra"
@@ -181,10 +182,11 @@ func generateDefaultFilename(host, query string) string {
 	q = reg.ReplaceAllString(q, "")
 	q = strings.Trim(q, "-")
 
+	d := time.Now().Format("20060102")
 	suffix := make([]byte, 4)
 	rand.Read(suffix)
 
-	return fmt.Sprintf("%s-%s-%x.json", h, q, suffix)
+	return fmt.Sprintf("%s-%s-%s-%x.json", h, q, d, suffix)
 }
 
 func exportJSON(filename string, results []gitlab.SearchResult) error {
